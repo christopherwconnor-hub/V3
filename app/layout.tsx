@@ -19,5 +19,5 @@ export const viewport: Viewport = {
 };
 
 export default function RootLayout({ children }: Readonly<{ children: React.ReactNode }>) {
-  return <html lang="en" data-theme="dark"><body className={`${sans.variable} ${mono.variable}`}>{children}</body></html>;
+  return <html lang="en" data-theme="midnight"><body className={`${sans.variable} ${mono.variable}`}>{children}</body></html>;
 }

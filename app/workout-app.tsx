@@ -2,7 +2,7 @@
 
 import { useEffect, useRef, useState } from "react";
 
-type Exercise = { name: string; sets?: number; target?: string };
+type Exercise = { name: string; sets?: number; target?: string; suggestedWeight?: string };
 type Day = {
   id: string;
   short: string;
@@ -14,7 +14,9 @@ type Day = {
 };
 type SetLog = { weight: string; reps: string; done: boolean };
 type Logs = Record<string, SetLog[]>;
-type Tab = "home" | "workout" | "progress" | "history";
+type WorkoutPlan = { id: string; name: string; days: Day[]; imported?: boolean };
+type Theme = "midnight" | "light" | "rose";
+type Tab = "home" | "workout" | "progress" | "history" | "plans";
 
 const DAYS: Day[] = [
   {
@@ -95,22 +97,96 @@ const DAYS: Day[] = [
   },
 ];
 
+const BUILT_IN_PLAN: WorkoutPlan = {
+  id: "strongweek-original",
+  name: "StrongWeek Original",
+  days: DAYS,
+};
+
 const ICONS = {
-  home: "⌂", workout: "↗", progress: "⌁", history: "◷",
+  home: "⌂", workout: "↗", progress: "⌁", history: "◷", plans: "✦",
 };
 
 function keyFor(dayId: string, exercise: string) {
   return `${dayId}:${exercise}`;
 }
 
-function makeInitialLogs(): Logs {
+function makeInitialLogs(days: Day[] = DAYS): Logs {
   const logs: Logs = {};
-  DAYS.forEach((day) => day.exercises.forEach((exercise) => {
+  days.forEach((day) => day.exercises.forEach((exercise) => {
     logs[keyFor(day.id, exercise.name)] = Array.from({ length: exercise.sets ?? 1 }, () => ({
-      weight: "", reps: "", done: false,
+      weight: exercise.suggestedWeight ?? "", reps: "", done: false,
     }));
   }));
   return logs;
+}
+
+const DAY_NAMES = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"];
+
+function parseWorkoutPlan(text: string, planName: string): WorkoutPlan {
+  const lines = text.replace(/\r/g, "").split("\n").map((line) => line.trim()).filter(Boolean);
+  const days: Day[] = [];
+  const planId = `custom-${Date.now()}`;
+  let current: Day | null = null;
+  let readingFinisher = false;
+
+  for (const raw of lines) {
+    const line = raw.replace(/^[•*]\s*/, "");
+    const heading = line.match(/^(Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday)\s*[–—-]\s*(.+)$/i);
+    if (heading) {
+      const day = DAY_NAMES.find((name) => name.toLowerCase() === heading[1].toLowerCase()) ?? heading[1];
+      current = {
+        id: `${planId}-${day.toLowerCase()}`,
+        short: day.slice(0, 3).toUpperCase(),
+        day,
+        title: heading[2].trim(),
+        exercises: [],
+      };
+      days.push(current);
+      readingFinisher = false;
+      continue;
+    }
+    if (!current) continue;
+    if (/^finish\s*:?\s*$/i.test(line)) {
+      readingFinisher = true;
+      continue;
+    }
+    if (readingFinisher) {
+      current.finisher = line;
+      readingFinisher = false;
+      continue;
+    }
+    if (/^\(.+\)$/.test(line) && current.exercises.length === 0) {
+      current.note = line.slice(1, -1);
+      continue;
+    }
+    const exercise = line.match(/^(.*?)\s*[–—-]\s*(\d+)\s*[×x]\s*(.+)$/i);
+    if (exercise) {
+      const prescription = exercise[3].trim();
+      const weightMatch = prescription.match(/(?:@|,|\s)\s*(\d+(?:\.\d+)?)\s*(?:lb|lbs|kg)\s*$/i);
+      const target = weightMatch
+        ? prescription.slice(0, weightMatch.index).trim().replace(/[,;@-]\s*$/, "")
+        : prescription;
+      current.exercises.push({
+        name: exercise[1].trim(),
+        sets: Number(exercise[2]),
+        target: target.replace(/^(\d+(?:[–—-]\d+)?)$/, "$1 reps"),
+        suggestedWeight: weightMatch?.[1],
+      });
+    } else if (!/^⸻+$/.test(line)) {
+      current.exercises.push({ name: line });
+    }
+  }
+
+  if (!days.length) throw new Error("No day headings found. Use a heading like “Monday – Arms & Abs”.");
+  if (days.some((day) => day.exercises.length === 0)) throw new Error("One or more days did not contain any exercises.");
+  const cleanName = planName.replace(/\.txt$/i, "").replace(/[-_]+/g, " ").trim();
+  return {
+    id: planId,
+    name: cleanName ? cleanName.replace(/\b\w/g, (letter) => letter.toUpperCase()) : "Imported Plan",
+    days,
+    imported: true,
+  };
 }
 
 function useStoredState<T>(key: string, initial: T) {
@@ -133,8 +209,13 @@ function useStoredState<T>(key: string, initial: T) {
 
 export function WorkoutApp() {
   const today = (new Date().getDay() + 6) % 7;
-  const defaultDay = today < 6 ? DAYS[today] : DAYS[0];
   const [tab, setTab] = useState<Tab>("home");
+  const [customPlans, setCustomPlans] = useStoredState<WorkoutPlan[]>("strongweek-plans", []);
+  const [activePlanId, setActivePlanId] = useStoredState("strongweek-active-plan", BUILT_IN_PLAN.id);
+  const plans = [BUILT_IN_PLAN, ...customPlans];
+  const activePlan = plans.find((plan) => plan.id === activePlanId) ?? BUILT_IN_PLAN;
+  const days = activePlan.days;
+  const defaultDay = days[today] ?? days[0];
   const [selectedId, setSelectedId] = useState(defaultDay.id);
   const [logs, setLogs] = useStoredState<Logs>("strongweek-logs", makeInitialLogs());
   const [history, setHistory] = useStoredState<{ id: string; day: string; title: string; date: string; volume: number }[]>("strongweek-history", []);
@@ -142,16 +223,22 @@ export function WorkoutApp() {
     { date: "Jul 1", value: 188.4 }, { date: "Jul 8", value: 187.9 }, { date: "Jul 15", value: 187.2 },
   ]);
   const [photos, setPhotos] = useStoredState<string[]>("strongweek-photos", []);
-  const [dark, setDark] = useStoredState("strongweek-dark", true);
+  const [theme, setTheme] = useStoredState<Theme>("strongweek-theme", "midnight");
+  const [importError, setImportError] = useState("");
+  const [importSuccess, setImportSuccess] = useState("");
+  const [pasteName, setPasteName] = useState("");
+  const [pasteText, setPasteText] = useState("");
   const [rest, setRest] = useState(0);
+  const [restPreset, setRestPreset] = useStoredState("strongweek-rest-preset", 60);
   const [cardio, setCardio] = useState(0);
   const [weightInput, setWeightInput] = useState("");
   const fileRef = useRef<HTMLInputElement>(null);
-  const selected = DAYS.find((d) => d.id === selectedId) ?? DAYS[0];
+  const planFileRef = useRef<HTMLInputElement>(null);
+  const selected = days.find((d) => d.id === selectedId) ?? days[0];
 
   useEffect(() => {
-    document.documentElement.dataset.theme = dark ? "dark" : "light";
-  }, [dark]);
+    document.documentElement.dataset.theme = theme;
+  }, [theme]);
   useEffect(() => {
     if (rest <= 0) return;
     const timer = window.setInterval(() => setRest((s) => Math.max(0, s - 1)), 1000);
@@ -171,10 +258,52 @@ export function WorkoutApp() {
   const completion = allSets.length ? Math.round((done / allSets.length) * 100) : 0;
   const weekly = Math.min(100, Math.round((new Set(history.map((h) => h.day))).size / 6 * 100));
 
+  function choosePlan(plan: WorkoutPlan) {
+    setActivePlanId(plan.id);
+    setSelectedId(plan.days[0].id);
+    setTab("home");
+  }
+
+  async function importPlan(file?: File) {
+    if (!file) return;
+    setImportError("");
+    setImportSuccess("");
+    try {
+      const plan = parseWorkoutPlan(await file.text(), file.name);
+      setCustomPlans((current) => [...current, plan]);
+      setLogs((current) => ({ ...makeInitialLogs(plan.days), ...current }));
+      setActivePlanId(plan.id);
+      setSelectedId(plan.days[0].id);
+      setImportSuccess(`${plan.name} was added with ${plan.days.length} scheduled days.`);
+    } catch (error) {
+      setImportError(error instanceof Error ? error.message : "That file could not be read.");
+    } finally {
+      if (planFileRef.current) planFileRef.current.value = "";
+    }
+  }
+
+  function addPastedPlan() {
+    setImportError("");
+    setImportSuccess("");
+    try {
+      if (!pasteText.trim()) throw new Error("Paste your workout plan into the text box first.");
+      const plan = parseWorkoutPlan(pasteText, pasteName.trim() || "Pasted Workout Plan");
+      setCustomPlans((current) => [...current, plan]);
+      setLogs((current) => ({ ...makeInitialLogs(plan.days), ...current }));
+      setActivePlanId(plan.id);
+      setSelectedId(plan.days[0].id);
+      setPasteName("");
+      setPasteText("");
+      setImportSuccess(`${plan.name} was created with ${plan.days.length} scheduled days and is now active.`);
+    } catch (error) {
+      setImportError(error instanceof Error ? error.message : "That workout text could not be read.");
+    }
+  }
+
   function updateSet(exercise: Exercise, index: number, patch: Partial<SetLog>) {
     const key = keyFor(selected.id, exercise.name);
     setLogs((current) => {
-      const base = current[key] ?? Array.from({ length: exercise.sets ?? 1 }, () => ({ weight: "", reps: "", done: false }));
+      const base = current[key] ?? Array.from({ length: exercise.sets ?? 1 }, () => ({ weight: exercise.suggestedWeight ?? "", reps: "", done: false }));
       const next = base.map((item, i) => i === index ? { ...item, ...patch } : item);
       return { ...current, [key]: next };
     });
@@ -204,7 +333,7 @@ export function WorkoutApp() {
     <div className="app-shell">
       <aside className="rail">
         <div className="brand"><span className="brand-mark">S</span><span>STRONG<span>WEEK</span></span></div>
-        <nav>{(["home", "workout", "progress", "history"] as Tab[]).map((item) =>
+        <nav>{(["home", "workout", "progress", "history", "plans"] as Tab[]).map((item) =>
           <button key={item} className={tab === item ? "active" : ""} onClick={() => setTab(item)}>
             <span>{ICONS[item]}</span>{item}
           </button>)}</nav>
@@ -217,7 +346,8 @@ export function WorkoutApp() {
           <div className="eyebrow">{new Date().toLocaleDateString("en-US", { weekday: "long", month: "long", day: "numeric" })}</div>
           <div className="top-actions">
             {rest > 0 && <button className="timer-pill" onClick={() => setRest(0)}>REST {Math.floor(rest / 60)}:{String(rest % 60).padStart(2, "0")}</button>}
-            <button className="icon-button" aria-label="Toggle theme" onClick={() => setDark(!dark)}>{dark ? "☼" : "☾"}</button>
+            <button className="plan-pill" onClick={() => setTab("plans")}>{activePlan.name}<span>⌄</span></button>
+            <button className="icon-button" aria-label="Open themes" onClick={() => setTab("plans")}>◐</button>
           </div>
         </header>
 
@@ -241,7 +371,7 @@ export function WorkoutApp() {
 
           <div className="section-heading"><div><p className="kicker">THE PLAN</p><h2>Your week</h2></div><span>Consistency over intensity.</span></div>
           <div className="week-grid">
-            {DAYS.map((day, i) => <button className={`day-card ${day.id === defaultDay.id ? "today" : ""}`} key={day.id} onClick={() => openWorkout(day)}>
+            {days.map((day, i) => <button className={`day-card ${day.id === defaultDay.id ? "today" : ""}`} key={day.id} onClick={() => openWorkout(day)}>
               <div className="day-top"><span>0{i + 1}</span><i>→</i></div>
               <small>{day.day}</small><h3>{day.title}</h3>
               <div className="muscle-lines"><i/><i/><i/></div>
@@ -261,7 +391,18 @@ export function WorkoutApp() {
             <div><p className="kicker">{selected.day.toUpperCase()} · SESSION</p><h1>{selected.title}</h1>{selected.note && <p>{selected.note}</p>}</div>
             <div className="completion-ring" style={{ "--p": `${completion * 3.6}deg` } as React.CSSProperties}><span>{completion}%</span></div>
           </div>
-          <div className="day-tabs">{DAYS.map((d) => <button key={d.id} className={selected.id===d.id?"active":""} onClick={()=>setSelectedId(d.id)}>{d.short}</button>)}</div>
+          <div className="day-tabs">{days.map((d) => <button key={d.id} className={selected.id===d.id?"active":""} onClick={()=>setSelectedId(d.id)}>{d.short}</button>)}</div>
+          <section className="rest-dock" aria-label="Rest timer">
+            <div className="rest-readout"><span>REST TIMER</span><strong>{Math.floor(rest / 60)}:{String(rest % 60).padStart(2, "0")}</strong></div>
+            <div className="rest-presets">
+              {[30,60,90,120].map((seconds)=><button key={seconds} className={restPreset===seconds?"selected":""} onClick={()=>{setRestPreset(seconds);setRest(seconds)}}>{seconds<60?`${seconds}s`:`${seconds/60}m`}</button>)}
+            </div>
+            <div className="rest-actions">
+              <button aria-label="Subtract 15 seconds" onClick={()=>setRest(value=>Math.max(0,value-15))}>−15</button>
+              <button className="rest-start" onClick={()=>setRest(rest?0:restPreset)}>{rest?"Stop":"Start"}</button>
+              <button aria-label="Add 15 seconds" onClick={()=>setRest(value=>value+15)}>+15</button>
+            </div>
+          </section>
           <div className="exercise-list">
             {selected.exercises.map((exercise, exIndex) => {
               const exerciseLogs = logs[keyFor(selected.id, exercise.name)] ?? [];
@@ -277,7 +418,7 @@ export function WorkoutApp() {
                       <b>{i + 1}</b><span className="previous">{previous ? "Last logged" : "—"}</span>
                       <input inputMode="decimal" aria-label={`${exercise.name} set ${i+1} weight`} value={item.weight} onChange={(e)=>updateSet(exercise,i,{weight:e.target.value})} placeholder="0"/>
                       <input inputMode="numeric" aria-label={`${exercise.name} set ${i+1} reps`} value={item.reps} onChange={(e)=>updateSet(exercise,i,{reps:e.target.value})} placeholder={exercise.target?.match(/\d+/)?.[0] ?? "0"}/>
-                      <button className={item.done?"check done":"check"} aria-label="Mark set complete" onClick={()=>{updateSet(exercise,i,{done:!item.done}); if(!item.done)setRest(60)}}>{item.done?"✓":""}</button>
+                      <button className={item.done?"check done":"check"} aria-label="Mark set complete" onClick={()=>{updateSet(exercise,i,{done:!item.done}); if(!item.done)setRest(restPreset)}}>{item.done?"✓":""}</button>
                     </div>)}
                   </div> : <button className={exerciseLogs[0]?.done?"recovery-check done":"recovery-check"} onClick={()=>updateSet(exercise,0,{done:!exerciseLogs[0]?.done})}><span>{exerciseLogs[0]?.done?"✓":"○"}</span>{exerciseLogs[0]?.done?"Completed":"Mark complete"}</button>}
                 </div>
@@ -313,9 +454,59 @@ export function WorkoutApp() {
           <div className="page-title"><p className="kicker">SHOWING UP COUNTS</p><h1>History</h1><p>Your completed sessions, kept on this device.</p></div>
           <div className="history-list">{history.length ? history.map((h,i)=><article key={h.id}><span>{String(i+1).padStart(2,"0")}</span><div><small>{h.date}</small><h3>{h.title}</h3></div><strong>{h.volume ? `${h.volume.toLocaleString()} lb` : "Complete"}</strong></article>) : <div className="empty-state"><span>◷</span><h2>Your first session starts here.</h2><p>Complete a workout and it will appear in your history.</p><button className="primary" onClick={()=>setTab("workout")}>Open workout</button></div>}</div>
         </div>}
+
+        {tab === "plans" && <div className="page">
+          <div className="page-title"><p className="kicker">MAKE IT YOURS</p><h1>Plans & themes</h1><p>Choose your look, switch schedules, or bring in a new routine.</p></div>
+          <section className="settings-section">
+            <div className="settings-title"><div><p className="kicker">APPEARANCE</p><h2>Choose a theme</h2></div><p>Your choice is remembered on this device.</p></div>
+            <div className="theme-grid">
+              {([
+                { id: "midnight", name: "Midnight Blue", note: "Charcoal, black & electric blue", colors: ["#080a0e","#10141a","#2774ff"] },
+                { id: "light", name: "Clean Light", note: "White, soft gray & bright blue", colors: ["#f3f5f8","#ffffff","#176bff"] },
+                { id: "rose", name: "Blush Studio", note: "Warm white, blush pink & berry", colors: ["#fff8fb","#ffffff","#e94f93"] },
+              ] as {id:Theme;name:string;note:string;colors:string[]}[]).map((choice) =>
+                <button key={choice.id} className={`theme-card ${theme===choice.id?"selected":""}`} onClick={()=>setTheme(choice.id)}>
+                  <div className="swatches">{choice.colors.map((color)=><i key={color} style={{background:color}}/>)}</div>
+                  <span className="theme-check">{theme===choice.id?"✓":""}</span>
+                  <h3>{choice.name}</h3><p>{choice.note}</p>
+                </button>)}
+            </div>
+          </section>
+          <section className="settings-section">
+            <div className="settings-title"><div><p className="kicker">WORKOUT LIBRARY</p><h2>Choose your plan</h2></div><p>{plans.length} {plans.length===1?"plan":"plans"} saved</p></div>
+            <div className="plan-list">
+              {plans.map((plan)=><article key={plan.id} className={plan.id===activePlan.id?"selected":""}>
+                <div className="plan-badge">{plan.imported?"TXT":"SW"}</div>
+                <div><small>{plan.imported?"IMPORTED PLAN":"BUILT-IN PLAN"}</small><h3>{plan.name}</h3><p>{plan.days.length} scheduled days · {plan.days.reduce((sum,day)=>sum+day.exercises.length,0)} movements</p></div>
+                <div className="plan-actions">
+                  {plan.id===activePlan.id?<span>Active</span>:<button onClick={()=>choosePlan(plan)}>Use plan</button>}
+                  {plan.imported&&<button className="delete-plan" aria-label={`Delete ${plan.name}`} onClick={()=>{setCustomPlans(items=>items.filter(item=>item.id!==plan.id));if(activePlan.id===plan.id)choosePlan(BUILT_IN_PLAN)}}>×</button>}
+                </div>
+              </article>)}
+            </div>
+          </section>
+          <section className="paste-import">
+            <div className="settings-title"><div><p className="kicker">PASTE & BUILD</p><h2>Create a plan from copied text</h2></div><p>No file needed.</p></div>
+            <div className="paste-layout">
+              <div className="paste-fields">
+                <label>Plan name<input value={pasteName} onChange={(event)=>setPasteName(event.target.value)} placeholder="My new workout plan"/></label>
+                <label>Workout plan text<textarea value={pasteText} onChange={(event)=>setPasteText(event.target.value)} placeholder={"Monday – Upper Body\n\nShoulder Press – 3 × 10 @ 25 lb\nCable Row – 3 × 12, 40 lb\n\nFinish:\n15 minutes incline treadmill"}/></label>
+              </div>
+              <aside><span>✓</span><h3>What it understands</h3><p>Monday–Sunday schedules, workout titles, parenthetical notes, sets, rep ranges, seconds, starting weights in lb or kg, recovery tasks, and Finish sections.</p><button className="primary" onClick={addPastedPlan}>Create workout plan <span>→</span></button></aside>
+            </div>
+          </section>
+          <section className="import-card">
+            <div className="import-icon">＋</div>
+            <div><p className="kicker">ADD A NEW SCHEDULE</p><h2>Import a plain-text workout plan</h2><p>Use day headings such as <b>Monday – Arms & Abs</b>, then list exercises as <b>Hammer Curl – 3 × 12</b>. “Finish:” sections are supported too.</p></div>
+            <input ref={planFileRef} hidden type="file" accept=".txt,text/plain" onChange={(event)=>importPlan(event.target.files?.[0])}/>
+            <button className="primary" onClick={()=>planFileRef.current?.click()}>Choose .txt file <span>↑</span></button>
+          </section>
+          {importError&&<p className="import-message error">{importError}</p>}
+          {importSuccess&&<p className="import-message success">{importSuccess}</p>}
+        </div>}
       </main>
 
-      <nav className="bottom-nav">{(["home","workout","progress","history"] as Tab[]).map(item=><button key={item} className={tab===item?"active":""} onClick={()=>setTab(item)}><span>{ICONS[item]}</span>{item}</button>)}</nav>
+      <nav className="bottom-nav">{(["home","workout","progress","history","plans"] as Tab[]).map(item=><button key={item} className={tab===item?"active":""} onClick={()=>setTab(item)}><span>{ICONS[item]}</span>{item}</button>)}</nav>
     </div>
   );
 }
