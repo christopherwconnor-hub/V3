@@ -1,0 +1,12 @@
+{
+  "name": "StrongWeek Workout Tracker",
+  "short_name": "StrongWeek",
+  "description": "Your premium six-day workout tracker.",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#06080b",
+  "theme_color": "#06080b",
+  "icons": [
+    { "src": "/favicon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any maskable" }
+  ]
+}
